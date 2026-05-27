@@ -7,7 +7,9 @@ from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
 import openpi.models.gemma as _gemma
+from openpi.models_pytorch.concept_kd import ConceptKDModule
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
+from openpi.models_pytorch.pkt import PKTModule
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 
 
@@ -516,24 +518,103 @@ class PI0Pytorch(nn.Module):
 class DistilledPI0Pytorch(PI0Pytorch):
     def __init__(self, config):
         super().__init__(config)
+        self.loss_weight_gt = config.loss_weight_gt
+        self.loss_weight_teacher = config.loss_weight_teacher
 
-    def forward(self, observation, actions, teacher: PI0Pytorch, noise=None, time=None) -> Tensor:
-        """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
+        # Optional multimodal concept KD module.
+        self.use_concept_kd = bool(getattr(config, "use_concept_kd", False))
+        self.concept_loss_weight = float(getattr(config, "concept_loss_weight", 1.0))
+        self.concept_kd = None
+        if self.use_concept_kd:
+            paligemma_cfg = _gemma.get_config(config.paligemma_variant, depth=config.gemma_depth)
+            action_expert_cfg = _gemma.get_config(config.action_expert_variant, depth=config.gemma_depth)
+            teacher_paligemma_cfg = _gemma.get_config(
+                config.paligemma_variant, depth=config.gemma_depth
+            )
+            teacher_action_expert_cfg = _gemma.get_config(
+                config.action_expert_variant, depth=config.gemma_depth
+            )
+            # NOTE: teacher dims come from the teacher backbone variant, which matches the student
+            # in the standard pi0.5 distillation setup (same paligemma/action_expert variants,
+            # different depths). Override if needed in the future.
+            self.concept_kd = ConceptKDModule(
+                config,
+                student_prefix_dim=paligemma_cfg.width,
+                teacher_prefix_dim=teacher_paligemma_cfg.width,
+                student_action_dim=action_expert_cfg.width,
+                teacher_action_dim=teacher_action_expert_cfg.width,
+            )
+
+        # Optional Probabilistic Knowledge Transfer module (independent of concept KD).
+        self.use_pkt = bool(getattr(config, "use_pkt", False))
+        self.pkt_loss_weight = float(getattr(config, "pkt_loss_weight", 1.0))
+        self.pkt = None
+        if self.use_pkt:
+            self.pkt = PKTModule(config)
+
+    def _set_capture(self, model: "PI0Pytorch", layer_indices: set | None) -> None:
+        """Enable/disable hidden-state capture on the underlying transformer."""
+        pwe = model.paligemma_with_expert
+        if layer_indices is None or not layer_indices:
+            pwe._capture_layer_set = None
+            pwe._captured_hidden = {}
+        else:
+            pwe._capture_layer_set = set(int(i) for i in layer_indices)
+            pwe._captured_hidden = {}
+
+    def _read_capture(self, model: "PI0Pytorch") -> dict:
+        pwe = model.paligemma_with_expert
+        captured = pwe._captured_hidden
+        # Reset to avoid leaking state across calls.
+        pwe._capture_layer_set = None
+        pwe._captured_hidden = {}
+        return captured
+
+    def forward(self, observation, actions, teacher: PI0Pytorch, noise=None, time=None):
+        """Training forward pass.
+
+        Returns:
+          A dict with at least:
+            - "loss": scalar total loss (the value used for backward).
+            - "loss_gt": ground-truth flow-matching loss.
+            - "loss_kd": output-level KD loss (vs teacher v_t), zero if disabled.
+          When `use_concept_kd` is enabled, additionally:
+            - "loss_concept": aggregated concept loss.
+            - "loss_concept_visual" / "_language" / "_action": modality breakdowns.
+            - "loss_concept_teacher" / "_student": per-side averages.
+            - "loss_concept/{modality}/{key}": per (modality, layer pair) losses.
+        """
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
-
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
-
 
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
+        # Enable hidden-state capture if concept KD and/or PKT is on.
+        concept_on = self.use_concept_kd and self.concept_kd is not None
+        pkt_on = self.use_pkt and self.pkt is not None
+        capture_on = concept_on or pkt_on
+        if capture_on:
+            student_layers: set[int] = set()
+            teacher_layers: set[int] = set()
+            if concept_on:
+                student_layers |= self.concept_kd.student_layer_indices()
+                teacher_layers |= self.concept_kd.teacher_layer_indices()
+            if pkt_on:
+                student_layers |= self.pkt.student_layer_indices()
+                teacher_layers |= self.pkt.teacher_layer_indices()
+            self._set_capture(self, student_layers)
+            self._set_capture(teacher, teacher_layers)
+
         with torch.no_grad():
             v_t_teacher = teacher.eval_model(observation, actions, noise, time)
+
+        teacher_captured = self._read_capture(teacher) if capture_on else {}
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
@@ -565,9 +646,17 @@ class DistilledPI0Pytorch(PI0Pytorch):
             )
             return suffix_out
 
-        suffix_out = self._apply_checkpoint(
-            forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
-        )
+        if capture_on:
+            # Skip the outer checkpoint: captured hidden states escape via a side-effect
+            # dict, which would be overwritten by the checkpoint's recomputation in backward.
+            # Per-layer checkpointing inside paligemma_with_expert still provides memory savings.
+            suffix_out = forward_func(prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond)
+        else:
+            suffix_out = self._apply_checkpoint(
+                forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
+            )
+
+        student_captured = self._read_capture(self) if capture_on else {}
 
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
@@ -580,6 +669,84 @@ class DistilledPI0Pytorch(PI0Pytorch):
 
         loss_output_gt = F.mse_loss(u_t, v_t, reduction="mean")
         loss_output_teacher = F.mse_loss(v_t_teacher, v_t, reduction="mean")
+        total = self.loss_weight_gt * loss_output_gt + self.loss_weight_teacher * loss_output_teacher
 
-        return loss_output_gt + loss_output_teacher
+        out = {
+            "loss_gt": loss_output_gt.detach(),
+            "loss_kd": loss_output_teacher.detach(),
+        }
+
+        if capture_on:
+            # Number of visual tokens = prefix length - number of language tokens.
+            num_lang = lang_tokens.shape[1]
+            num_visual = prefix_embs.shape[1] - num_lang
+            # prefix_pad_masks[:, :num_visual] is False for tokens from masked cameras
+            # (e.g. the zero-padded right wrist in Libero). Pass it so concept KD / PKT skip them.
+            visual_mask = prefix_pad_masks[:, :num_visual]
+
+        if concept_on:
+            concept_out = self.concept_kd(
+                student_states=student_captured,
+                teacher_states=teacher_captured,
+                num_visual_tokens=num_visual,
+                num_language_tokens=num_lang,
+                action_horizon=self.config.action_horizon,
+                language_mask=lang_masks,
+                visual_mask=visual_mask,
+            )
+            loss_concept = concept_out["loss_concept"]
+            total = total + self.concept_loss_weight * loss_concept
+
+            out["loss_concept"] = loss_concept.detach()
+
+            # Per-modality breakdown.
+            per_pair = concept_out["per_pair"]
+            per_pair_teacher = concept_out["per_pair_teacher"]
+            per_pair_student = concept_out["per_pair_student"]
+            for modality in self.concept_kd.modalities:
+                vals = [v for k, v in per_pair.items() if k.startswith(modality + "_")]
+                if vals:
+                    out[f"loss_concept_{modality}"] = torch.stack(vals).mean().detach()
+            if per_pair_teacher:
+                out["loss_concept_teacher"] = torch.stack(list(per_pair_teacher.values())).mean().detach()
+            if per_pair_student:
+                out["loss_concept_student"] = torch.stack(list(per_pair_student.values())).mean().detach()
+            # Per-pair entries: "loss_concept/{modality}/s{si}_t{ti}".
+            for key, val in per_pair.items():
+                modality, suf = key.split("_", 1)
+                out[f"loss_concept/{modality}/{suf}"] = val.detach()
+
+            # Diagnostics: scalar metrics + sample distribution tensors for wandb.
+            # Keys prefixed with "concept_diagnostics/" are scalars (averaged by trainer).
+            # Keys prefixed with "concept_hist/" are [n, C] tensors (logged as histograms).
+            for k, v in concept_out.items():
+                if k.startswith(("concept_diagnostics/", "concept_hist/")):
+                    out[k] = v if not isinstance(v, torch.Tensor) or v.dim() > 0 else v.detach()
+
+        if pkt_on:
+            pkt_out = self.pkt(
+                student_states=student_captured,
+                teacher_states=teacher_captured,
+                num_visual_tokens=num_visual,
+                num_language_tokens=num_lang,
+                action_horizon=self.config.action_horizon,
+                language_mask=lang_masks,
+                visual_mask=visual_mask,
+            )
+            loss_pkt = pkt_out["loss_pkt"]
+            total = total + self.pkt_loss_weight * loss_pkt
+
+            out["loss_pkt"] = loss_pkt.detach()
+
+            per_pair_pkt = pkt_out["per_pair"]
+            for modality in self.pkt.modalities:
+                vals = [v for k, v in per_pair_pkt.items() if k.startswith(modality + "_")]
+                if vals:
+                    out[f"loss_pkt_{modality}"] = torch.stack(vals).mean().detach()
+            for key, val in per_pair_pkt.items():
+                modality, suf = key.split("_", 1)
+                out[f"loss_pkt/{modality}/{suf}"] = val.detach()
+
+        out["loss"] = total
+        return out
 

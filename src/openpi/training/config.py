@@ -470,6 +470,8 @@ class TrainConfig:
     project_name: str = "openpi"
     # Experiment name. Will be used to name the metadata and checkpoint directories.
     exp_name: str = tyro.MISSING
+    # Group name for wandb runs. Defaults to "libero".
+    group: str = "libero"
 
     # Defines the model config. Some attributes (action_dim, action_horizon, and max_token_len) are shared by all models
     # -- see BaseModelConfig. Specific model implementations (e.g., Pi0Config) inherit from BaseModelConfig and may
@@ -743,7 +745,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi0_libero_l06",
-        wandb_enabled=False,
+        wandb_enabled=True,
         model=pi0_config.DistilledPi0Config(
             teacher_config="pi0_libero",
             gemma_depth=6
@@ -759,6 +761,574 @@ _CONFIGS = [
         save_interval=10_000,
         pytorch_training_precision="float32",
     ),
+
+    TrainConfig(
+        name="pi05_libero_l06_old",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=30_000,
+        batch_size=64,
+        log_interval=50,
+        save_interval=5_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # Student config with identical hyperparameters to the teacher pi05 config, except with gemma_depth=6 and loss_weight_teacher=0.0 to disable KD loss, 
+    # to be used as a baseline to compare against the KD version below.
+    TrainConfig(
+        name="pi05_libero_l09_student",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=9,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=0.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=30_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+
+        log_interval=50,
+        save_interval=5_000,
+
+
+        pytorch_training_precision="bfloat16",
+    ),
+    # KD config with the same hyperparameters as the student config above, but with loss_weight_teacher=1.0 to enable KD loss.
+    TrainConfig(
+        name="pi05_libero_l09_student_kd",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=9,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=30_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+
+        log_interval=50,
+        save_interval=5_000,
+
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # Concept KD config: output-level KD (loss_weight_teacher=1.0) + internal multimodal
+    # concept distillation (use_concept_kd=True) on top of GT flow-matching loss.
+    # Default settings per the design spec: 3 layer pairs (0,0)-(4,8)-(8,17), visual/language/action
+    # concept banks of sizes 512/128/256, cosine similarity, k-means init when assets exist.
+    TrainConfig(
+        name="pi05_libero_l09_student_kd_concept_3l_vla_0.1",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=9,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_concept_kd=True,
+            concept_modalities=("visual", "language", "action"),
+            concept_layer_pairs=((0, 0), (4, 8), (8, 17)),
+            concept_num_visual=512,
+            concept_num_language=128,
+            concept_num_action=256,
+            concept_similarity="cosine",
+            concept_temperature=0.1,
+            concept_sample_ratio=1.0,
+            concept_max_tokens=8192,
+            concept_loss_weight=0.1,
+            concept_teacher_loss_weight=1.0,
+            concept_student_loss_weight=1.0,
+            concept_use_student_projector=False,
+            concept_use_teacher_projector=False,
+            concept_projector_bias=True,
+            concept_init_from_kmeans=True,
+            concept_init_path=None,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=30_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+
+        log_interval=50,
+        save_interval=5_000,
+
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # PKT (Probabilistic Knowledge Transfer) — token variant.
+    # Output-level KD (loss_weight_teacher=1.0) + PKT applied at the last student/teacher
+    # layer (8 -> 17). Token mode samples tokens from each modality (vision/language/action)
+    # with the same K policy as concept KD, then matches batch-level cosine-similarity
+    # distributions. Modalities can be narrowed (e.g. ("visual",)) to align only one stream.
+    TrainConfig(
+        name="pi05_libero_l09_student_kd_pkt_token",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=9,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_pkt=True,
+            pkt_mode="token",
+            pkt_modalities=("visual", "language", "action"),
+            pkt_layer_pairs=((8, 17),),
+            pkt_sample_ratio=1.0,
+            pkt_max_tokens=8192,
+            pkt_loss_weight=1.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=30_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+
+        log_interval=50,
+        save_interval=5_000,
+
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # PKT — global variant. One global representation per (sample, modality) via mean
+    # pooling over valid tokens, so the similarity matrix is [B, B] (between samples only).
+    TrainConfig(
+        name="pi05_libero_l09_student_kd_pkt_global",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=9,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_pkt=True,
+            pkt_mode="global",
+            pkt_modalities=("visual", "language", "action"),
+            pkt_layer_pairs=((8, 17),),
+            pkt_loss_weight=1.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=30_000,
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+
+        log_interval=50,
+        save_interval=5_000,
+
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # ============================================================
+    # Fast experiment configs: 6-layer student, batch 128, 20k steps.
+    # LR scaled by sqrt(128/256)≈0.71x → 3.5e-5, flat after 3k warmup.
+    # 3 distillation layer pairs uniformly matched: (0,0), (2,8), (5,17).
+    # Only final checkpoint saved (save_interval=20_000).
+    # ============================================================
+
+    # Baseline student — GT loss only, no KD.
+    TrainConfig(
+        name="pi05_libero_l06_fast_student",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=0.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=20_000,
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=3.5e-5,
+            decay_steps=1_000_000,
+            decay_lr=3.5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        log_interval=50,
+        save_interval=20_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # Output-level KD only.
+    TrainConfig(
+        name="pi05_libero_l06_fast_student_kd",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=20_000,
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=3.5e-5,
+            decay_steps=1_000_000,
+            decay_lr=3.5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        log_interval=50,
+        save_interval=20_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # KD + PKT token — last student/teacher layer pair (5,17).
+    TrainConfig(
+        name="pi05_libero_l06_fast_student_kd_pkt_token",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_pkt=True,
+            pkt_mode="token",
+            pkt_modalities=("visual", "language", "action"),
+            pkt_layer_pairs=((5, 17),),
+            pkt_sample_ratio=1.0,
+            pkt_max_tokens=8192,
+            pkt_loss_weight=1.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=20_000,
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=3.5e-5,
+            decay_steps=1_000_000,
+            decay_lr=3.5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        log_interval=50,
+        save_interval=20_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # KD + Concept distillation — all modalities (visual, language, action).
+    TrainConfig(
+        name="pi05_libero_l06_fast_student_kd_concept_vla_3l_0.1",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_concept_kd=True,
+            concept_modalities=("visual", "language", "action"),
+            concept_layer_pairs=((0, 0), (2, 8), (5, 17)),
+            concept_num_visual=512,
+            concept_num_language=128,
+            concept_num_action=256,
+            concept_similarity="cosine",
+            concept_temperature=0.1,
+            concept_sample_ratio=1.0,
+            concept_max_tokens=8192,
+            concept_loss_weight=0.1,
+            concept_teacher_loss_weight=1.0,
+            concept_student_loss_weight=1.0,
+            concept_use_student_projector=False,
+            concept_use_teacher_projector=False,
+            concept_projector_bias=True,
+            concept_init_from_kmeans=True,
+            concept_init_path=None,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=20_000,
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=3.5e-5,
+            decay_steps=1_000_000,
+            decay_lr=3.5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        log_interval=50,
+        save_interval=20_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # KD + Concept distillation — vision only.
+    TrainConfig(
+        name="pi05_libero_l06_fast_student_kd_concept_v_3l_0.1",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_concept_kd=True,
+            concept_modalities=("visual",),
+            concept_layer_pairs=((0, 0), (2, 8), (5, 17)),
+            concept_num_visual=512,
+            concept_num_language=128,
+            concept_num_action=256,
+            concept_similarity="cosine",
+            concept_temperature=0.1,
+            concept_sample_ratio=1.0,
+            concept_max_tokens=8192,
+            concept_loss_weight=0.1,
+            concept_teacher_loss_weight=1.0,
+            concept_student_loss_weight=1.0,
+            concept_use_student_projector=False,
+            concept_use_teacher_projector=False,
+            concept_projector_bias=True,
+            concept_init_from_kmeans=True,
+            concept_init_path=None,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=20_000,
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=3.5e-5,
+            decay_steps=1_000_000,
+            decay_lr=3.5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        log_interval=50,
+        save_interval=20_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # KD + Concept distillation — language only.
+    TrainConfig(
+        name="pi05_libero_l06_fast_student_kd_concept_l_3l_0.1",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_concept_kd=True,
+            concept_modalities=("language",),
+            concept_layer_pairs=((0, 0), (2, 8), (5, 17)),
+            concept_num_visual=512,
+            concept_num_language=128,
+            concept_num_action=256,
+            concept_similarity="cosine",
+            concept_temperature=0.1,
+            concept_sample_ratio=1.0,
+            concept_max_tokens=8192,
+            concept_loss_weight=0.1,
+            concept_teacher_loss_weight=1.0,
+            concept_student_loss_weight=1.0,
+            concept_use_student_projector=False,
+            concept_use_teacher_projector=False,
+            concept_projector_bias=True,
+            concept_init_from_kmeans=True,
+            concept_init_path=None,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=20_000,
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=3.5e-5,
+            decay_steps=1_000_000,
+            decay_lr=3.5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        log_interval=50,
+        save_interval=20_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # KD + Concept distillation — action only.
+    TrainConfig(
+        name="pi05_libero_l06_fast_student_kd_concept_a_3l_0.1",
+        wandb_enabled=True,
+        model=pi0_config.DistilledPi0Config(
+            teacher_config="pi05_libero",
+            gemma_depth=6,
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            loss_weight_gt=1.0,
+            loss_weight_teacher=1.0,
+            use_concept_kd=True,
+            concept_modalities=("action",),
+            concept_layer_pairs=((0, 0), (2, 8), (5, 17)),
+            concept_num_visual=512,
+            concept_num_language=128,
+            concept_num_action=256,
+            concept_similarity="cosine",
+            concept_temperature=0.1,
+            concept_sample_ratio=1.0,
+            concept_max_tokens=8192,
+            concept_loss_weight=0.1,
+            concept_teacher_loss_weight=1.0,
+            concept_student_loss_weight=1.0,
+            concept_use_student_projector=False,
+            concept_use_teacher_projector=False,
+            concept_projector_bias=True,
+            concept_init_from_kmeans=True,
+            concept_init_path=None,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        pytorch_weight_path="checkpoints_converted/pi05_libero_torch",
+        num_train_steps=20_000,
+        batch_size=128,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=3.5e-5,
+            decay_steps=1_000_000,
+            decay_lr=3.5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        log_interval=50,
+        save_interval=20_000,
+        pytorch_training_precision="bfloat16",
+    ),
+
+    # official teacher config.
     TrainConfig(
         name="pi05_libero",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
@@ -780,6 +1350,7 @@ _CONFIGS = [
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
     ),
+
     #
     # Fine-tuning Aloha configs.
     #

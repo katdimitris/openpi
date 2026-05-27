@@ -134,3 +134,19 @@ zipp==3.20.2
     #   etils
     #   importlib-metadata
     #   importlib-resources
+wandb
+annotated-types
+click
+gitdb
+GitPython
+platformdirs
+protobuf==3.20.3
+pydantic
+pydantic_core
+promise
+sentry-sdk
+smmap
+typing_extensions
+shortuuid
+setproctitle
+pathtools

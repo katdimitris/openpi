@@ -114,3 +114,64 @@ class DistilledPi0Config(Pi0Config):
     teacher_config: str = "pi0_libero"
     loss_weight_gt: float = 1.0
     loss_weight_teacher: float = 1.0
+
+    # ----- Multimodal Concept KD (off by default; preserves baseline behavior) -----
+    use_concept_kd: bool = False
+
+    # Modalities to align with concepts.
+    concept_modalities: tuple[str, ...] = ("visual", "language", "action")
+
+    # (student_layer_idx, teacher_layer_idx) pairs at which to align representations.
+    # Default mapping for l09 student vs l18 teacher.
+    concept_layer_pairs: tuple[tuple[int, int], ...] = (
+        (0, 0),
+        (4, 8),
+        (8, 17),
+    )
+
+    # Number of concept vectors per modality.
+    concept_num_visual: int = 512
+    concept_num_language: int = 128
+    concept_num_action: int = 256
+
+    # "cosine" or "l2".
+    concept_similarity: str = "cosine"
+    concept_temperature: float = 0.1
+
+    # Token subsampling.
+    concept_sample_ratio: float = 0.10
+    concept_max_tokens: int = 2048
+
+    # Loss combination.
+    concept_loss_weight: float = 1.0
+    concept_teacher_loss_weight: float = 1.0
+    concept_student_loss_weight: float = 1.0
+
+    # Projectors.
+    concept_use_student_projector: bool = True
+    concept_use_teacher_projector: bool = False
+    concept_projector_bias: bool = True
+
+    # K-means initialization for concept vectors.
+    concept_init_path: str | None = None
+    concept_init_from_kmeans: bool = True
+    concept_freeze_prototypes: bool = False
+
+    # Sinkhorn (fixed defaults).
+    concept_sinkhorn_eps: float = 0.05
+    concept_sinkhorn_iters: int = 3
+
+    # ----- Probabilistic Knowledge Transfer (PKT) -----
+    # Independent of concept KD: matches batch-level cosine-similarity distributions
+    # between student and teacher hidden reps. Two variants:
+    #   - "token":  sample K tokens per (modality, layer pair), like concept KD.
+    #   - "global": mean-pool valid tokens per (sample, modality) -> [B, D] reps.
+    # Defaults to the deepest student/teacher layer (l09 student vs l18 teacher).
+    use_pkt: bool = False
+    pkt_mode: str = "token"  # "token" or "global"
+    pkt_modalities: tuple[str, ...] = ("visual", "language", "action")
+    pkt_layer_pairs: tuple[tuple[int, int], ...] = ((8, 17),)
+    pkt_sample_ratio: float = 1.0
+    pkt_max_tokens: int = 8192
+    pkt_loss_weight: float = 1.0
+    pkt_eps: float = 1e-7

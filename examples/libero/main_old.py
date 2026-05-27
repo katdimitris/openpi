@@ -14,8 +14,6 @@ from openpi_client import websocket_client_policy as _websocket_client_policy
 import tqdm
 import tyro
 
-import wandb
-
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
@@ -43,20 +41,11 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
-    save_name: str = "default_eval_run"
+
     seed: int = 7  # Random Seed (for reproducibility)
 
 
 def eval_libero(args: Args) -> None:
-    # --- ADDED: WandB initialization ---
-    wandb.init(
-        project="openpi-eval",
-        group=args.task_suite_name,
-        name=args.save_name,
-        config=dataclasses.asdict(args),
-        settings=wandb.Settings(start_method="thread")
-    )
-
     # Set random seed
     np.random.seed(args.seed)
 
@@ -175,13 +164,6 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # --- ADDED: WandB log episode result ---
-            wandb.log({
-                "eval/episode_success": int(done),
-                "eval/total_success_rate": float(total_successes) / float(total_episodes),
-                "eval/episode": total_episodes
-            })
-
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
@@ -202,9 +184,6 @@ def eval_libero(args: Args) -> None:
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
-    
-    # --- ADDED: Finalize WandB ---
-    wandb.finish()
 
 
 def _get_libero_env(task, resolution, seed):

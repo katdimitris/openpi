@@ -85,6 +85,7 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
     else:
         wandb.init(
             name=config.exp_name,
+            group=config.group,
             config=dataclasses.asdict(config),
             project=config.project_name,
         )
@@ -539,6 +540,7 @@ def train_loop(config: _config.TrainConfig):
     model.train()
     start_time = time.time()
     infos = []  # Collect stats over log interval
+    latest_hist: dict[str, torch.Tensor] = {}  # most-recent concept distribution samples
     if is_main:
         logging.info(
             f"Running on: {platform.node()} | world_size={torch.distributed.get_world_size() if use_ddp else 1}"
@@ -583,7 +585,15 @@ def train_loop(config: _config.TrainConfig):
                 pg["lr"] = lr_schedule(global_step)
 
             # Forward pass
-            loss = model(observation, actions, teacher=teacher_model)
+            out = model(observation, actions, teacher=teacher_model)
+            # DistilledPI0Pytorch now returns a dict with "loss" plus diagnostic components.
+            # For robustness, also support legacy callers that return a plain Tensor.
+            if isinstance(out, dict):
+                loss = out["loss"]
+                aux_losses = {k: v for k, v in out.items() if k != "loss"}
+            else:
+                loss = out
+                aux_losses = {}
 
             # Backward pass
             loss.backward()
@@ -607,13 +617,18 @@ def train_loop(config: _config.TrainConfig):
 
             # Collect stats
             if is_main:
-                infos.append(
-                    {
-                        "loss": loss.item(),
-                        "learning_rate": optim.param_groups[0]["lr"],
-                        "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
-                    }
-                )
+                info_entry = {
+                    "loss": loss.item(),
+                    "learning_rate": optim.param_groups[0]["lr"],
+                    "grad_norm": float(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm,
+                }
+                # Add scalar auxiliary losses (loss_gt, loss_kd, loss_concept_*, etc.)
+                for k, v in aux_losses.items():
+                    if isinstance(v, torch.Tensor) and v.numel() == 1:
+                        info_entry[k] = v.detach().item()
+                    elif k.startswith("concept_hist/") and isinstance(v, torch.Tensor):
+                        latest_hist[k] = v.detach().cpu()
+                infos.append(info_entry)
 
             if is_main and (global_step % config.log_interval == 0):
                 elapsed = time.time() - start_time
@@ -645,6 +660,33 @@ def train_loop(config: _config.TrainConfig):
                     }
                     if avg_grad_norm is not None:
                         log_payload["grad_norm"] = avg_grad_norm
+
+                    # Auxiliary scalar losses (loss_gt, loss_kd, loss_concept, etc.)
+                    aux_keys = {
+                        k for info in infos for k in info.keys()
+                        if k not in ("loss", "learning_rate", "grad_norm")
+                    }
+                    for k in aux_keys:
+                        vals = [info[k] for info in infos if k in info]
+                        if vals:
+                            log_payload[k] = sum(vals) / len(vals)
+
+                    # Concept KD sample distributions logged as histograms.
+                    # concept_hist/pt → concept_diagnostics/pt_sample_{i}
+                    for hist_key, arr in latest_hist.items():
+                        base = hist_key.replace("concept_hist/", "concept_diagnostics/")
+                        for i, sample in enumerate(arr):  # arr: [n, C]
+                            log_payload[f"{base}_s{i}"] = wandb.Histogram(sample.numpy())
+
+                    # Concept bank diagnostics (VN entropy, mean cosine).
+                    # Computed here rather than every forward pass to avoid per-step
+                    # eigendecomposition overhead (9 banks × eigvalsh would add ~5-20 ms/step).
+                    raw_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+                    concept_kd = getattr(raw_model, "concept_kd", None)
+                    if concept_kd is not None:
+                        for k, v in concept_kd._compute_bank_diagnostics().items():
+                            log_payload[k] = v.item()
+
                     wandb.log(log_payload, step=global_step)
 
                 start_time = time.time()

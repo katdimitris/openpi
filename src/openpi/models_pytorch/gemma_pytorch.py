@@ -60,6 +60,13 @@ class PaliGemmaWithExpertModel(nn.Module):
 
         self.to_bfloat16_for_selected_params(precision)
 
+        # Optional capture of post-layer hidden states for concept KD.
+        # When `_capture_layer_set` is not None, after each transformer layer whose index is
+        # in the set, the (prefix, suffix) hidden states are stored in `_captured_hidden`.
+        # Stays None outside concept KD use so the standard path is unaffected.
+        self._capture_layer_set: set | None = None
+        self._captured_hidden: dict = {}
+
     def to_bfloat16_for_selected_params(self, precision: Literal["bfloat16", "float32"] = "bfloat16"):
         if precision == "bfloat16":
             self.to(dtype=torch.bfloat16)
@@ -253,6 +260,13 @@ class PaliGemmaWithExpertModel(nn.Module):
                 else:
                     inputs_embeds = compute_layer_complete(
                         layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond
+                    )
+
+                # Optionally record post-layer hidden states for concept KD.
+                if self._capture_layer_set is not None and layer_idx in self._capture_layer_set:
+                    self._captured_hidden[layer_idx] = (
+                        inputs_embeds[0],
+                        inputs_embeds[1],
                     )
 
                 # Old code removed - now using compute_layer_complete function above

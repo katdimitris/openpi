@@ -19,17 +19,19 @@ services:
     environment:
       - CLIENT_ARGS
       - DISPLAY=$DISPLAY
-      - MUJOCO_GL=${MUJOCO_GL:-egl}
+      - MUJOCO_GL=osmesa #${MUJOCO_GL:-egl}
       - MUJOCO_EGL_DEVICE_ID=0
       - NVIDIA_DRIVER_CAPABILITIES=all
-      - PYOPENGL_PLATFORM=egl
+      - PYOPENGL_PLATFORM=osmesa # egl
+      - WANDB_DISABLE_SERVICE=true
+      - WANDB_API_KEY=${WANDB_API_KEY}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, compute, utility, graphics]
 
   openpi_server:
     image: openpi_server
@@ -54,4 +56,4 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, compute, utility, graphics]

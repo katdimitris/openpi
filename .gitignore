@@ -1,6 +1,9 @@
 # Data directories.
 assets/
 checkpoints/
+checkpoints_converted/
+downloaded_checkpoints/
+eval_outputs/
 data/
 wandb/
 
