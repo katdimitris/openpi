@@ -1,5 +1,5 @@
 #!/bin/bash
-# VM 1: baseline + KD + PKT
+# VM 1: kmeans_fixed concept KD ablations — NO student projector (vla / v / l / a).
 
 set -e
 
@@ -13,14 +13,30 @@ GROUP="libero_fast"
 # Norm stats are identical across all configs (same data). Copy from existing run.
 NORM_SRC="./assets/pi05_libero_l09_student/physical-intelligence/libero"
 for config in \
-    pi05_libero_l06_fast_student \
-    pi05_libero_l06_fast_student_kd \
-    pi05_libero_l06_fast_student_kd_pkt_token; do
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_v_3l_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_l_3l_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_a_3l_0.1; do
     dst="./assets/${config}/physical-intelligence/libero"
     mkdir -p "${dst}"
     cp "${NORM_SRC}/norm_stats.json" "${dst}/norm_stats.json"
 done
 echo "Norm stats copied."
+
+# K-means initialization for the concept bank. One run on the VLA superset config
+# produces all (visual/language/action) centroids in a single file, which every
+# kmeans_fixed_* config reads via concept_init_path.
+KMEANS_FILE="./assets/concept_kmeans/pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1/concepts.pt"
+if [ ! -f "${KMEANS_FILE}" ]; then
+    echo "Running k-means init -> ${KMEANS_FILE}"
+    uv run scripts/init_concept_kmeans.py \
+        pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1 \
+        --batch-size 32 \
+        --num-batches 50 \
+        2>&1 | tee init_concept_kmeans.log
+else
+    echo "K-means file already present at ${KMEANS_FILE}; skipping init."
+fi
 
 run_exp() {
     local config_name="$1"
@@ -39,8 +55,9 @@ run_exp() {
     echo ""
 }
 
-run_exp pi05_libero_l06_fast_student                 libero_l06_fast_student
-run_exp pi05_libero_l06_fast_student_kd              libero_l06_fast_student_kd
-run_exp pi05_libero_l06_fast_student_kd_pkt_token    libero_l06_fast_student_kd_pkt_token
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1  libero_l06_fast_concept_kmeans_fixed_vla
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_v_3l_0.1    libero_l06_fast_concept_kmeans_fixed_v
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_l_3l_0.1    libero_l06_fast_concept_kmeans_fixed_l
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_a_3l_0.1    libero_l06_fast_concept_kmeans_fixed_a
 
 echo "VM1 experiments complete."

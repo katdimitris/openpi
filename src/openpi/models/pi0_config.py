@@ -157,6 +157,11 @@ class DistilledPi0Config(Pi0Config):
     concept_init_from_kmeans: bool = True
     concept_freeze_prototypes: bool = False
 
+    # If True, use only L_soft = CE(p_t, p_s); drop L_teacher and L_student, and detach p_t
+    # so gradients flow only to the student. Pairs with concept_freeze_prototypes=True for
+    # the "kmeans_fixed" regime (k-means-initialized prototypes, no updates to them).
+    concept_soft_loss_only: bool = False
+
     # Sinkhorn (fixed defaults).
     concept_sinkhorn_eps: float = 0.05
     concept_sinkhorn_iters: int = 3

@@ -151,6 +151,7 @@ class ConceptKDModule(nn.Module):
         self.sinkhorn_eps: float = config.concept_sinkhorn_eps
         self.sinkhorn_iters: int = config.concept_sinkhorn_iters
         self.freeze_prototypes: bool = getattr(config, "concept_freeze_prototypes", False)
+        self.soft_loss_only: bool = getattr(config, "concept_soft_loss_only", False)
 
         for m in self.modalities:
             if m not in _MODALITIES:
@@ -271,18 +272,22 @@ class ConceptKDModule(nn.Module):
         student_tokens: torch.Tensor,
         teacher_tokens: torch.Tensor,
         mask: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute (L_soft_kd, L_teacher_sinkhorn, L_student_sinkhorn) for one (modality, layer pair).
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+        """Compute (L_soft_kd, L_teacher_sinkhorn, L_student_sinkhorn, diagnostics) for one (modality, layer pair).
 
-        Mirrors the three-loss formulation from the original ViT ConceptKD:
+        Default (soft_loss_only=False): mirrors the three-loss formulation from the original ViT ConceptKD:
           loss1 = CE(p_t, p_s)       student matches teacher's soft concept distribution.
           loss2 = CE(q_t, p_t)       teacher aligns to its own Sinkhorn-balanced targets.
           loss3 = CE(q_s, p_s)       student aligns to its own Sinkhorn-balanced targets.
-          total = (loss1 + loss2 + loss3) / 2
+          total = (loss1 + loss2 + loss3) / 2  (combined in `forward`)
 
         Concepts are normalized the same way as tokens (normalize_mean_std) so all three
         live in the same statistical space before distances are computed. Gradients flow
         to the concept bank from all three loss terms.
+
+        soft_loss_only=True: only L_soft is computed, with M_t detached so gradients flow
+        only to the student. L_teacher and L_student are returned as zeros. Intended for
+        the kmeans_fixed regime where prototypes are frozen.
         """
         bank = self.banks[key]
 
@@ -292,7 +297,7 @@ class ConceptKDModule(nn.Module):
         total = s_flat.shape[0]
         if total == 0:
             zero = next(self.parameters()).new_zeros(())
-            return zero, zero, zero
+            return zero, zero, zero, {}
 
         idx = self._sample_indices(total, s_flat.device)
         s_sampled = s_flat[idx].to(torch.float32)  # [K, D_s]
@@ -311,13 +316,12 @@ class ConceptKDModule(nn.Module):
         t_proj = normalize_mean_std(t_proj)
         concepts = normalize_mean_std(bank.concepts.unsqueeze(0))  # [1, C, D]
 
-        # Similarities to concepts. Gradients flow to concepts from all paths.
+        # Similarities to concepts.
         M_s = self._similarity(s_proj, concepts)   # [1, K, C]
-        M_t = self._similarity(t_proj, concepts)   # [1, K, C]
-
-        # Balanced Sinkhorn targets (detached — used as fixed assignment targets).
-        q_t = sinkhorn(M_t, eps=self.sinkhorn_eps, n_iters=self.sinkhorn_iters)  # [1, K, C]
-        q_s = sinkhorn(M_s, eps=self.sinkhorn_eps, n_iters=self.sinkhorn_iters)  # [1, K, C]
+        # Detach the teacher branch in soft-only mode so gradients flow only to the student
+        # (and not through p_t into the teacher).
+        M_t_raw = self._similarity(t_proj, concepts)   # [1, K, C]
+        M_t = M_t_raw.detach() if self.soft_loss_only else M_t_raw
 
         # Softmax distributions with temperature.
         log_p_t = F.log_softmax(M_t / self.temperature, dim=-1)
@@ -326,10 +330,24 @@ class ConceptKDModule(nn.Module):
 
         # loss1: student matches teacher's soft distribution (cross-entropy).
         L_soft = -(p_t * log_p_s).sum(dim=-1).mean()
-        # loss2: teacher aligns to its Sinkhorn-balanced targets.
-        L_teacher = -(q_t * log_p_t).sum(dim=-1).mean()
-        # loss3: student aligns to its own Sinkhorn-balanced targets.
-        L_student = -(q_s * log_p_s).sum(dim=-1).mean()
+
+        if self.soft_loss_only:
+            # Skip L_teacher and L_student entirely — concepts are frozen and we want no
+            # gradients flowing through L_student to the student either.
+            zero = L_soft.new_zeros(())
+            L_teacher = zero
+            L_student = zero
+            # No q_t computed; use p_t as a placeholder for the histogram so consumers don't break.
+            q_t_for_hist = p_t.detach()
+        else:
+            # Balanced Sinkhorn targets (detached — used as fixed assignment targets).
+            q_t = sinkhorn(M_t, eps=self.sinkhorn_eps, n_iters=self.sinkhorn_iters)  # [1, K, C]
+            q_s = sinkhorn(M_s, eps=self.sinkhorn_eps, n_iters=self.sinkhorn_iters)  # [1, K, C]
+            # loss2: teacher aligns to its Sinkhorn-balanced targets.
+            L_teacher = -(q_t * log_p_t).sum(dim=-1).mean()
+            # loss3: student aligns to its own Sinkhorn-balanced targets.
+            L_student = -(q_s * log_p_s).sum(dim=-1).mean()
+            q_t_for_hist = q_t
 
         # --- per-pair diagnostics (no_grad, negligible overhead) ---
         with torch.no_grad():
@@ -350,7 +368,7 @@ class ConceptKDModule(nn.Module):
                 "ENK_t": ENK_t,
                 "ENK_s": ENK_s,
                 "pt_sample": p_t[0, :n].float(),   # [n, C]
-                "qt_sample": q_t[0, :n].float(),
+                "qt_sample": q_t_for_hist[0, :n].float(),
                 "ps_sample": p_s[0, :n].float(),
             }
 
@@ -410,7 +428,9 @@ class ConceptKDModule(nn.Module):
                     mask = None
 
                 L_soft, L_t, L_s, pair_diag = self._compute_pair_loss(key, s_tok, t_tok, mask)
-                L_pair = (L_soft + L_t + L_s) / 2
+                # In soft-only mode, L_t and L_s are zero and we don't divide by 2; the
+                # standard 3-loss combination keeps its (L_soft + L_t + L_s) / 2 form.
+                L_pair = L_soft if self.soft_loss_only else (L_soft + L_t + L_s) / 2
                 per_pair[key] = L_pair
                 per_pair_teacher[key] = L_t
                 per_pair_student[key] = L_s

@@ -1,5 +1,5 @@
 #!/bin/bash
-# VM 2: concept KD ablations (vla / v / l / a)
+# VM 2: kmeans_fixed concept KD ablations — WITH student projector (vla / v / l / a).
 
 set -e
 
@@ -13,15 +13,32 @@ GROUP="libero_fast"
 # Norm stats are identical across all configs (same data). Copy from existing run.
 NORM_SRC="./assets/pi05_libero_l09_student/physical-intelligence/libero"
 for config in \
-    pi05_libero_l06_fast_student_kd_concept_vla_3l_0.1 \
-    pi05_libero_l06_fast_student_kd_concept_v_3l_0.1 \
-    pi05_libero_l06_fast_student_kd_concept_l_3l_0.1 \
-    pi05_libero_l06_fast_student_kd_concept_a_3l_0.1; do
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_vla_3l_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_v_3l_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_l_3l_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_a_3l_0.1; do
     dst="./assets/${config}/physical-intelligence/libero"
     mkdir -p "${dst}"
     cp "${NORM_SRC}/norm_stats.json" "${dst}/norm_stats.json"
 done
 echo "Norm stats copied."
+
+# K-means initialization for the concept bank. Proj and no-proj variants share the
+# same kmeans file (it is built from teacher activations only — the student-side
+# projector does not affect what gets clustered). One run on the VLA superset config
+# produces all (visual/language/action) centroids that every kmeans_fixed_* config
+# loads via concept_init_path.
+KMEANS_FILE="./assets/concept_kmeans/pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1/concepts.pt"
+if [ ! -f "${KMEANS_FILE}" ]; then
+    echo "Running k-means init -> ${KMEANS_FILE}"
+    uv run scripts/init_concept_kmeans.py \
+        pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1 \
+        --batch-size 32 \
+        --num-batches 50 \
+        2>&1 | tee init_concept_kmeans.log
+else
+    echo "K-means file already present at ${KMEANS_FILE}; skipping init."
+fi
 
 run_exp() {
     local config_name="$1"
@@ -40,9 +57,9 @@ run_exp() {
     echo ""
 }
 
-run_exp pi05_libero_l06_fast_student_kd_concept_vla_3l_0.1  libero_l06_fast_concept_vla
-run_exp pi05_libero_l06_fast_student_kd_concept_v_3l_0.1    libero_l06_fast_concept_v
-run_exp pi05_libero_l06_fast_student_kd_concept_l_3l_0.1    libero_l06_fast_concept_l
-run_exp pi05_libero_l06_fast_student_kd_concept_a_3l_0.1    libero_l06_fast_concept_a
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_vla_3l_0.1  libero_l06_fast_concept_kmeans_fixed_proj_vla
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_v_3l_0.1    libero_l06_fast_concept_kmeans_fixed_proj_v
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_l_3l_0.1    libero_l06_fast_concept_kmeans_fixed_proj_l
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_a_3l_0.1    libero_l06_fast_concept_kmeans_fixed_proj_a
 
 echo "VM2 experiments complete."
