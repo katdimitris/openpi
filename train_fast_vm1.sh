@@ -2,6 +2,7 @@
 # VM 1: kmeans_fixed concept KD ablations — NO student projector (vla / v / l / a).
 
 set -e
+set -o pipefail   # so failures in `<cmd> | tee ...` abort the script
 
 export NCCL_NET=Socket
 export WANDB_API_KEY="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"

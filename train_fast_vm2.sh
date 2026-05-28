@@ -2,6 +2,7 @@
 # VM 2: kmeans_fixed concept KD ablations — WITH student projector (vla / v / l / a).
 
 set -e
+set -o pipefail   # so failures in `<cmd> | tee ...` abort the script
 
 export NCCL_NET=Socket
 export WANDB_API_KEY="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"
@@ -31,8 +32,14 @@ echo "Norm stats copied."
 KMEANS_FILE="./assets/concept_kmeans/pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1/concepts.pt"
 if [ ! -f "${KMEANS_FILE}" ]; then
     echo "Running k-means init -> ${KMEANS_FILE}"
+    # Run init from the *proj* config (whose norm_stats are already copied above) but
+    # write to the shared KMEANS_FILE path that every config — proj and no-proj alike —
+    # points at via concept_init_path. Centroids are identical either way: kmeans
+    # depends only on teacher activations, which the student-side projector flag does
+    # not affect.
     uv run scripts/init_concept_kmeans.py \
-        pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1 \
+        pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_vla_3l_0.1 \
+        --output "${KMEANS_FILE}" \
         --batch-size 32 \
         --num-batches 50 \
         2>&1 | tee init_concept_kmeans.log
