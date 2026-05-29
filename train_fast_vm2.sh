@@ -1,5 +1,5 @@
 #!/bin/bash
-# VM 2: kmeans_fixed concept KD ablations — WITH student projector (vla / v / l / a).
+# VM 2: kmeans_fixed concept KD — single-layer-pair (last layer only), T=1.0.
 
 set -e
 set -o pipefail   # so failures in `<cmd> | tee ...` abort the script
@@ -14,32 +14,25 @@ GROUP="libero_fast"
 # Norm stats are identical across all configs (same data). Copy from existing run.
 NORM_SRC="./assets/pi05_libero_l09_student/physical-intelligence/libero"
 for config in \
-    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_vla_3l_0.1 \
-    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_v_3l_0.1 \
-    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_l_3l_0.1 \
-    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_a_3l_0.1; do
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_1l_T1_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_v_1l_T1_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_l_1l_T1_0.1 \
+    pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_a_1l_T1_0.1; do
     dst="./assets/${config}/physical-intelligence/libero"
     mkdir -p "${dst}"
     cp "${NORM_SRC}/norm_stats.json" "${dst}/norm_stats.json"
 done
 echo "Norm stats copied."
 
-# K-means initialization for the concept bank. Proj and no-proj variants share the
-# same kmeans file (it is built from teacher activations only — the student-side
-# projector does not affect what gets clustered). One run on the VLA superset config
-# produces all (visual/language/action) centroids that every kmeans_fixed_* config
-# loads via concept_init_path.
-KMEANS_FILE="./assets/concept_kmeans/pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_3l_0.1/concepts.pt"
+# K-means initialization for the concept bank. Centroids do not depend on temperature
+# (k-means is on raw teacher activations), so this produces the same numerical centers
+# as VM1; the file just lives under this VM's vla_1l_T1_0.1 config name to keep each
+# VM self-contained. All four T=1.0 variants on this VM read it via concept_init_path.
+KMEANS_FILE="./assets/concept_kmeans/pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_1l_T1_0.1/concepts.pt"
 if [ ! -f "${KMEANS_FILE}" ]; then
     echo "Running k-means init -> ${KMEANS_FILE}"
-    # Run init from the *proj* config (whose norm_stats are already copied above) but
-    # write to the shared KMEANS_FILE path that every config — proj and no-proj alike —
-    # points at via concept_init_path. Centroids are identical either way: kmeans
-    # depends only on teacher activations, which the student-side projector flag does
-    # not affect.
     uv run scripts/init_concept_kmeans.py \
-        pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_vla_3l_0.1 \
-        --output "${KMEANS_FILE}" \
+        pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_1l_T1_0.1 \
         --batch-size 32 \
         --num-batches 50 \
         2>&1 | tee init_concept_kmeans.log
@@ -64,9 +57,9 @@ run_exp() {
     echo ""
 }
 
-run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_vla_3l_0.1  libero_l06_fast_concept_kmeans_fixed_proj_vla
-run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_v_3l_0.1    libero_l06_fast_concept_kmeans_fixed_proj_v
-run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_l_3l_0.1    libero_l06_fast_concept_kmeans_fixed_proj_l
-run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_proj_a_3l_0.1    libero_l06_fast_concept_kmeans_fixed_proj_a
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_vla_1l_T1_0.1  libero_l06_fast_concept_kmeans_fixed_vla_1l_T1
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_v_1l_T1_0.1    libero_l06_fast_concept_kmeans_fixed_v_1l_T1
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_l_1l_T1_0.1    libero_l06_fast_concept_kmeans_fixed_l_1l_T1
+run_exp pi05_libero_l06_fast_student_kd_concept_kmeans_fixed_a_1l_T1_0.1    libero_l06_fast_concept_kmeans_fixed_a_1l_T1
 
 echo "VM2 experiments complete."
