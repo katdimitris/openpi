@@ -4,6 +4,8 @@
 set -e
 set -o pipefail   # so failures in `<cmd> | tee ...` abort the script
 
+sleep 150m
+
 export NCCL_NET=Socket
 export WANDB_API_KEY="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"
 
